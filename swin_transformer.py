@@ -273,10 +273,10 @@ class PatchMerging(nn.Module):
         
         # Update H, W
         H, W = H // 2, W // 2
-        x = x.view(B, -1, 4 * C)  # (B, N/4, 4*C)
+        x = x.view(B, -1, 4 * C)  # (B, H/2, W/2, 4*C) to (B, N/4, 4*C)
 
         x = self.norm(x)
-        x = self.reduction(x)
+        x = self.reduction(x) # (B, N/4, 4*C) to (B, n/4, 2*C)
         
         return x, H, W
 
