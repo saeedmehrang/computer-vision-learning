@@ -179,8 +179,8 @@ class WindowAttention(nn.Module):
         return x
 
 
-class SwinTransformerBlock(nn.Module):
-    """ Swin Transformer Block with W-MSA or SW-MSA """
+class SwinTransformerLayer(nn.Module):
+    """ Swin Transformer Layer with W-MSA or SW-MSA """
     def __init__(self, dim, num_heads, window_size=7, shift_size=0):
         super().__init__()
         self.dim = dim
@@ -206,7 +206,7 @@ class SwinTransformerBlock(nn.Module):
         B, N, C = x.shape
         shortcut = x
         x = self.norm1(x)
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C) # retrieve the height and width by unpacking N
 
         # Create mask if we are shifting
         if self.shift_size > 0:
@@ -220,13 +220,14 @@ class SwinTransformerBlock(nn.Module):
         
         # Partition into windows
         x_windows = window_partition(shifted_x, self.window_size) # (B*nW, ws, ws, C)
+        # now flatten each window as attention mechanism needs a flattened array
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C) # (B*nW, ws*ws, C)
         
         # W-MSA / SW-MSA
         attn_windows = self.attn(x_windows, mask=shift_mask) # (B*nW, ws*ws, C)
         
         # Reverse window partition
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C) # (B*nW, ws, ws, C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W) # (B, H, W, C)
         
         # Reverse cyclic shift
@@ -235,7 +236,7 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
         
-        x = x.view(B, H * W, C)
+        x = x.view(B, H * W, C) # to (B, N, C) needed for shortcut connection and MLP 
 
         # Residual connection + MLP
         x = shortcut + x
@@ -247,7 +248,7 @@ class PatchMerging(nn.Module):
     """ Patch Merging Layer for 2D """
     def __init__(self, dim):
         super().__init__()
-        self.dim = dim
+        self.dim = dim # just note that dim = C
         # Linear layer to halve the channels (from 4*C to 2*C)
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.norm = nn.LayerNorm(4 * dim)
@@ -298,33 +299,34 @@ class PatchEmbed(nn.Module):
         """
         x = self.proj(x)  # (B, embed_dim, H/p, W/p)
         B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)  # (B, N, C)
+        x = x.flatten(2)  # (B, C, N) such that N = H * W
+        x = x.transpose(1, 2) # (B, N, C)
         x = self.norm(x)
         return x, H, W
 
 
-class BasicLayer(nn.Module):
-    """ A basic Swin Transformer layer for one stage. """
+class BasicBlock(nn.Module):
+    """ A basic Swin Transformer block for one stage with as many layers as depth. """
     def __init__(self, dim, depth, num_heads, window_size, downsample=None):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            SwinTransformerBlock(
+        self.layers = nn.ModuleList()
+        for i in range(depth):
+            layer = SwinTransformerLayer(
                 dim=dim,
                 num_heads=num_heads,
                 window_size=window_size,
                 shift_size=0 if (i % 2 == 0) else window_size // 2
             )
-            for i in range(depth)
-        ])
+            self.layers.append(layer)
 
         self.downsample = downsample
 
     def forward(self, x, H, W):
-        for block in self.blocks:
-            x = block(x, H, W)
+        for layer in self.layers:
+            x = layer(x, H, W)
 
         if self.downsample is not None:
-            x, H, W = self.downsample(x, H, W)
+            x, H, W = self.downsample(x, H, W) # one time downsampling at the end of the block
 
         return x, H, W
 
@@ -338,35 +340,40 @@ class SwinTransformer(nn.Module):
                  window_size=7):
         super().__init__()
         
-        self.num_layers = len(depths)
+        self.num_blocks = len(depths)
         
         # 1. Patch Embedding
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
 
         # 2. Build Swin Transformer Stages
-        self.layers = nn.ModuleList()
-        for i in range(self.num_layers):
-            layer = BasicLayer(
-                dim=int(embed_dim * 2 ** i),
+        self.blocks = nn.ModuleList()
+        for i in range(self.num_blocks):
+            # specify the feature_dim (or number of channels C) for this block
+            this_dim = int(embed_dim * 2 ** i)
+            # determine if we need/can do downsampling
+            this_downsampling = PatchMerging(this_dim) if (i < self.num_blocks - 1) else None
+            # initialize the block
+            block = BasicBlock(
+                dim=this_dim,
                 depth=depths[i],
                 num_heads=num_heads[i],
                 window_size=window_size,
-                downsample=PatchMerging(int(embed_dim * 2 ** i)) if (i < self.num_layers - 1) else None
+                downsample=this_downsampling,
             )
-            self.layers.append(layer)
+            self.blocks.append(block)
 
         # 3. Final Classification Head
-        self.norm = nn.LayerNorm(int(embed_dim * 2 ** (self.num_layers - 1)))
+        self.norm = nn.LayerNorm(int(embed_dim * 2 ** (self.num_blocks - 1)))
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(int(embed_dim * 2 ** (self.num_layers - 1)), num_classes)
+        self.head = nn.Linear(int(embed_dim * 2 ** (self.num_blocks - 1)), num_classes)
 
     def forward(self, x):
         # x: (B, C, H, W)
-        x, H, W = self.patch_embed(x)
+        x, H, W = self.patch_embed(x) # output x has shape (B, N, C)
         
         # Pass through all stages
-        for layer in self.layers:
-            x, H, W = layer(x, H, W)
+        for block in self.blocks:
+            x, H, W = block(x, H, W)
             
         # Final layers for classification
         x = self.norm(x)  # (B, N, C)
