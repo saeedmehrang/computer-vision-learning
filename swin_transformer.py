@@ -64,9 +64,34 @@ def window_reverse(windows, window_size: int, H: int, W: int):
 
 def create_mask(H, W, window_size, shift_size):
     """
-    Create an attention mask for shifted window attention.
+    Create an attention mask for Shifted Window Multi-Head Self-Attention (SW-MSA).
+    
     This prevents attention between patches that are not neighbors
-    (i.e., patches that wrapped around).
+    (i.e., patches that were wrapped around).
+
+    When a cyclic shift is applied to the feature map, patches that wrap around (e.g., from 
+    the bottom edge to the top edge) are not true neighbors but end up in the same attention 
+    window. This mask prevents attention between these non-adjacent, wrapped-around patches.
+
+    The core idea is to divide the original feature map into nine distinct regions (based on 
+    the window size and shift size), assign a unique integer ID to each region, and then 
+    partition this ID map into windows. If two patches within a window have different IDs, 
+    it means they originated from different, non-contiguous regions of the original image 
+    and must be masked out.
+
+    Args:
+        H (int): Height of the feature map.
+        W (int): Width of the feature map.
+        window_size (int): Size of the local window (e.g., 7).
+        shift_size (int): The amount of cyclic shift (e.g., window_size // 2).
+
+    Returns:
+        torch.Tensor: An attention mask of shape (num_windows, window_size*window_size, 
+                    window_size*window_size). It contains:
+                    - 0.0: Where patches within a window have the same ID (valid attention).
+                    - -100.0: Where patches have different IDs (invalid attention).
+                                This large negative value ensures the attention weight is 
+                                zero after the softmax operation.
     """
     # Create a "map" of window IDs
     img_mask = torch.zeros(1, H, W, 1)  # (1, H, W, 1)
