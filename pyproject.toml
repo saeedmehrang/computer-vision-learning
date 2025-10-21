@@ -1,0 +1,19 @@
+[project]
+name = "cv-learning"
+version = "0.1.0"
+description = "Computer Vision Learning"
+requires-python = ">=3.13, <3.14"
+dependencies = [
+    "torch==2.9.0",
+    "torch-vision",
+    "scikit-image",
+    "numpy",
+    "matplotlib"
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.4.2",
+    "black>=23.0.0",
+    "ipykernel>=7.0.1"
+]
